@@ -23,6 +23,7 @@ export const API_ENDPOINTS = {
     `/api/v1/users/${userId}/import/apple/xml/direct`,
   userAppleXmlPresignedUrl: (userId: string) =>
     `/api/v1/users/${userId}/import/apple/xml/s3`,
+  userToken: (userId: string) => `/api/v1/users/${userId}/token`,
 
   // OAuth endpoints
   oauthAuthorize: (provider: string) => `/api/v1/oauth/${provider}/authorize`,
@@ -66,4 +67,16 @@ export const API_ENDPOINTS = {
 
   // Accept invitation (public - no auth)
   acceptInvitation: '/api/v1/invitations/accept',
+
+  // Summary endpoints (authenticated - requires user authorization)
+  userActivitySummary: (userId: string) =>
+    `/api/v1/users/${userId}/summaries/activity`,
+  userSleepSummary: (userId: string) =>
+    `/api/v1/users/${userId}/summaries/sleep`,
+  userBodySummary: (userId: string) => `/api/v1/users/${userId}/summaries/body`,
+  userRecoverySummary: (userId: string) =>
+    `/api/v1/users/${userId}/summaries/recovery`,
+
+  // Sleep sessions endpoint
+  userSleepSessions: (userId: string) => `/api/v1/users/${userId}/events/sleep`,
 } as const;

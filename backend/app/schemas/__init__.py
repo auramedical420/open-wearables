@@ -76,6 +76,15 @@ from .garmin.activity_import import (
 from .garmin.activity_import import (
     RootJSON as GarminRootJSON,
 )
+from .garmin.wellness_import import (
+    GarminBodyCompJSON,
+    GarminDailyJSON,
+    GarminEpochJSON,
+    GarminPulseOxJSON,
+    GarminRespirationJSON,
+    GarminSleepJSON,
+    GarminStressJSON,
+)
 from .invitation import (
     InvitationAccept,
     InvitationCreate,
@@ -113,7 +122,9 @@ from .sdk import SDKAuthContext, SDKTokenRequest
 from .series_types import SeriesType
 from .summaries import (
     ActivitySummary,
+    BloodPressure,
     BodySummary,
+    HeartRateStats,
     IntensityMinutes,
     RecoverySummary,
     SleepStagesSummary,
@@ -139,7 +150,10 @@ from .system_info import (
     SystemInfoResponse,
 )
 from .timeseries import (
+    ActiveMinutesResult,
+    ActivityAggregateResult,
     HeartRateSampleCreate,
+    IntensityMinutesResult,
     StepSampleCreate,
     TimeSeriesQueryParams,
     TimeSeriesSample,
@@ -217,6 +231,9 @@ __all__ = [
     "ExternalMappingCreate",
     "ExternalMappingUpdate",
     "ExternalMappingResponse",
+    "ActivityAggregateResult",
+    "ActiveMinutesResult",
+    "IntensityMinutesResult",
     "HeartRateSampleCreate",
     "TimeSeriesSampleCreate",
     "TimeSeriesSampleResponse",
@@ -244,6 +261,13 @@ __all__ = [
     # Garmin schemas
     "GarminRootJSON",
     "GarminActivityJSON",
+    "GarminSleepJSON",
+    "GarminDailyJSON",
+    "GarminEpochJSON",
+    "GarminBodyCompJSON",
+    "GarminStressJSON",
+    "GarminPulseOxJSON",
+    "GarminRespirationJSON",
     # Polar schemas
     "PolarExerciseJSON",
     # Whoop schemas
@@ -272,7 +296,9 @@ __all__ = [
     "WorkoutDetailed",
     # Summaries
     "ActivitySummary",
+    "BloodPressure",
     "BodySummary",
+    "HeartRateStats",
     "IntensityMinutes",
     "RecoverySummary",
     "SleepStagesSummary",

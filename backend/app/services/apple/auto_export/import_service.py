@@ -137,13 +137,20 @@ class ImportService:
             yield record, detail, hr_samples
 
     def load_data(self, db_session: DbSession, raw: dict, user_id: str) -> bool:
+        # Collect all HR samples from all workouts for a single batch insert
+        all_hr_samples: list[HeartRateSampleCreate] = []
+
         for record, detail, hr_samples in self._build_import_bundles(raw, user_id):
             created_record = self.event_record_service.create(db_session, record)
             detail_for_record = detail.model_copy(update={"record_id": created_record.id})
             self.event_record_service.create_detail(db_session, detail_for_record)
 
             if hr_samples:
-                self.timeseries_service.bulk_create_samples(db_session, hr_samples)
+                all_hr_samples.extend(hr_samples)
+
+        # Single batch insert for all HR samples
+        if all_hr_samples:
+            self.timeseries_service.bulk_create_samples(db_session, all_hr_samples)
 
         return True
 
@@ -163,16 +170,16 @@ class ImportService:
                 data = self._parse_json_content(request_content)
 
             if not data:
-                return UploadDataResponse(status_code=400, response="No valid data found")
+                return UploadDataResponse(status_code=400, response="No valid data found", user_id=user_id)
 
             # Load data using provided database session
             self.load_data(db_session, data, user_id=user_id)
 
         except Exception as e:
             log_and_capture_error(e, self.log, f"Import failed for user {user_id}: {e}", extra={"user_id": user_id})
-            return UploadDataResponse(status_code=400, response=f"Import failed: {str(e)}")
+            return UploadDataResponse(status_code=400, response=f"Import failed: {str(e)}", user_id=user_id)
 
-        return UploadDataResponse(status_code=200, response="Import successful")
+        return UploadDataResponse(status_code=200, response="Import successful", user_id=user_id)
 
     def _parse_multipart_content(self, content: str) -> dict | None:
         """Parse multipart form data to extract JSON."""

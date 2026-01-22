@@ -63,6 +63,19 @@ class EventRecordRepository(
                 return existing
             raise
 
+    def get_record_with_details(
+        self,
+        db_session: DbSession,
+        record_id: UUID,
+        category: str,
+    ) -> EventRecord | None:
+        return (
+            db_session.query(EventRecord)
+            .options(selectinload(EventRecord.detail))
+            .filter(EventRecord.id == record_id, EventRecord.category == category)
+            .first()
+        )
+
     def get_records_with_filters(
         self,
         db_session: DbSession,
@@ -102,7 +115,7 @@ class EventRecordRepository(
             filters.append(EventRecord.start_datetime >= query_params.start_datetime)
 
         if query_params.end_datetime:
-            filters.append(EventRecord.end_datetime <= query_params.end_datetime)
+            filters.append(EventRecord.end_datetime < query_params.end_datetime)
 
         if query_params.min_duration is not None:
             filters.append(EventRecord.duration_seconds >= query_params.min_duration)
@@ -262,7 +275,7 @@ class EventRecordRepository(
                 ExternalDeviceMapping.user_id == user_id,
                 EventRecord.category == "sleep",
                 EventRecord.end_datetime >= start_date,
-                cast(EventRecord.end_datetime, Date) <= cast(end_date, Date),
+                cast(EventRecord.end_datetime, Date) < cast(end_date, Date),
             )
             .group_by(
                 cast(EventRecord.end_datetime, Date),
@@ -372,12 +385,13 @@ class EventRecordRepository(
                 func.sum(WorkoutDetails.energy_burned).label("energy_sum"),
             )
             .join(ExternalDeviceMapping, self.model.external_device_mapping_id == ExternalDeviceMapping.id)
-            .join(WorkoutDetails, self.model.id == WorkoutDetails.record_id)
+            # Use outerjoin since WorkoutDetails is optional - some workouts may not have details
+            .outerjoin(WorkoutDetails, self.model.id == WorkoutDetails.record_id)
             .filter(
                 ExternalDeviceMapping.user_id == user_id,
                 self.model.category == "workout",
                 self.model.end_datetime >= start_date,
-                cast(self.model.end_datetime, Date) <= cast(end_date, Date),
+                cast(self.model.end_datetime, Date) < cast(end_date, Date),
             )
             .group_by(
                 cast(self.model.end_datetime, Date),

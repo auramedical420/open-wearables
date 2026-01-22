@@ -1,14 +1,19 @@
-from datetime import date, datetime
-from typing import TypedDict
-from uuid import UUID
+from datetime import datetime
+from uuid import UUID, uuid4
 
+from psycopg.errors import UniqueViolation
 from sqlalchemy import Date, asc, case, cast, func, literal_column, tuple_
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError as SQLAIntegrityError
 
 from app.database import DbSession
 from app.models import DataPointSeries, ExternalDeviceMapping
 from app.repositories.external_mapping_repository import ExternalMappingRepository
 from app.repositories.repositories import CrudRepository
 from app.schemas import (
+    ActiveMinutesResult,
+    ActivityAggregateResult,
+    IntensityMinutesResult,
     TimeSeriesQueryParams,
     TimeSeriesSampleCreate,
     TimeSeriesSampleUpdate,
@@ -17,43 +22,7 @@ from app.schemas.series_types import SeriesType, get_series_type_from_id, get_se
 from app.utils.exceptions import handle_exceptions
 from app.utils.pagination import decode_cursor
 
-
-class ActivityAggregateResult(TypedDict):
-    """Result from daily activity aggregation query."""
-
-    activity_date: date
-    provider_name: str
-    device_id: str | None
-    steps_sum: int
-    active_energy_sum: float
-    basal_energy_sum: float
-    hr_avg: int | None
-    hr_max: int | None
-    hr_min: int | None
-    distance_sum: float | None
-    flights_climbed_sum: int | None
-
-
-class ActiveMinutesResult(TypedDict):
-    """Result from daily active/sedentary minutes query."""
-
-    activity_date: date
-    provider_name: str
-    device_id: str | None
-    active_minutes: int
-    tracked_minutes: int
-    sedentary_minutes: int
-
-
-class IntensityMinutesResult(TypedDict):
-    """Result from daily intensity minutes query."""
-
-    activity_date: date
-    provider_name: str
-    device_id: str | None
-    light_minutes: int
-    moderate_minutes: int
-    vigorous_minutes: int
+MappingIdentity = tuple[UUID, str, str | None]
 
 
 class DataPointSeriesRepository(
@@ -72,50 +41,192 @@ class DataPointSeriesRepository(
         Handles duplicate records gracefully by catching IntegrityError and
         returning the existing record instead.
         """
-        mapping = self.mapping_repo.ensure_mapping(
-            db_session,
-            creator.user_id,
-            creator.provider_name,
-            creator.device_id,
-            creator.external_device_mapping_id,
-        )
+        mapping = self.create_mapping(db_session, creator)
 
         creation_data = creator.model_dump()
         creation_data["external_device_mapping_id"] = mapping.id
         creation_data["series_type_definition_id"] = get_series_type_id(creator.series_type)
+
         for redundant_key in ("user_id", "provider_name", "device_id", "series_type"):
             creation_data.pop(redundant_key, None)
 
+        creation = self.model(**creation_data)
+        db_session.add(creation)
+        return self.try_commit(db_session, creation)
+
+    @handle_exceptions
+    def bulk_create(self, db_session: DbSession, creators: list[TimeSeriesSampleCreate]) -> list[DataPointSeries]:
+        """Bulk create data point samples.
+
+        Optimized for performance:
+        - Resolves mappings efficiently (batch fetch + batch insert missing)
+        - Inserts data points in a single batch
+        """
+        if not creators:
+            return []
+
+        # 1. Resolve all necessary device mappings
+        identity_to_mapping_id = self._resolve_mappings(db_session, creators)
+
+        # 2. Build and execute data point batch insert
+        self._insert_data_points(db_session, creators, identity_to_mapping_id)
+
+        # Return empty list (ON CONFLICT DO NOTHING means strict tracking is omitted)
+        return []
+
+    def _resolve_mappings(
+        self, db_session: DbSession, creators: list[TimeSeriesSampleCreate]
+    ) -> dict[MappingIdentity, UUID]:
+        """Ensure all required mappings exist and return a lookup dict."""
+        # Identify all unique mappings needed
+        unique_identities: set[MappingIdentity] = {(c.user_id, c.provider_name, c.device_id) for c in creators}
+
+        # Step 1: Fetch what already exists
+        mapping_map = self._fetch_mappings_by_identity(db_session, list(unique_identities))
+
+        # Step 2: Handle missing mappings
+        missing_identities = [i for i in unique_identities if i not in mapping_map]
+
+        if missing_identities:
+            # Batch insert missing ones
+            self._batch_insert_mappings(db_session, missing_identities, creators)
+
+            # Re-fetch the ones we just inserted (or that conflicted) to get their validation IDs
+            # We re-fetch specifically the missing ones to ensure we have IDs for everything
+            newly_fetched = self._fetch_mappings_by_identity(db_session, missing_identities)
+            mapping_map.update(newly_fetched)
+
+        return mapping_map
+
+    def _fetch_mappings_by_identity(
+        self, db_session: DbSession, identities: list[MappingIdentity]
+    ) -> dict[MappingIdentity, UUID]:
+        """Batch fetch mappings for a list of identities."""
+        if not identities:
+            return {}
+
+        mappings = (
+            db_session.query(ExternalDeviceMapping)
+            .filter(
+                tuple_(
+                    ExternalDeviceMapping.user_id,
+                    ExternalDeviceMapping.provider_name,
+                    ExternalDeviceMapping.device_id,
+                ).in_(identities)
+            )
+            .all()
+        )
+
+        return {(m.user_id, m.provider_name, m.device_id): m.id for m in mappings}
+
+    def _batch_insert_mappings(
+        self,
+        db_session: DbSession,
+        identities: list[MappingIdentity],
+        creators_lookup: list[TimeSeriesSampleCreate],
+    ) -> None:
+        """Insert missing mappings ignoring conflicts."""
+        # Extract preferred IDs from creators if provided
+        preferred_ids: dict[MappingIdentity, UUID] = {}
+        for c in creators_lookup:
+            if c.external_device_mapping_id:
+                key = (c.user_id, c.provider_name, c.device_id)
+                preferred_ids[key] = c.external_device_mapping_id
+
+        mapping_values = []
+        for identity in identities:
+            # Use provided ID or generate new
+            m_id = preferred_ids.get(identity) or uuid4()
+            mapping_values.append(
+                {
+                    "id": m_id,
+                    "user_id": identity[0],
+                    "provider_name": identity[1],
+                    "device_id": identity[2],
+                }
+            )
+
+        if mapping_values:
+            stmt = (
+                insert(ExternalDeviceMapping)
+                .values(mapping_values)
+                .on_conflict_do_nothing(index_elements=["user_id", "provider_name", "device_id"])
+            )
+            db_session.execute(stmt)
+            # Flush to ensure visible for next select
+            db_session.flush()
+
+    def _insert_data_points(
+        self,
+        db_session: DbSession,
+        creators: list[TimeSeriesSampleCreate],
+        mapping_map: dict[MappingIdentity, UUID],
+    ) -> None:
+        """Batch insert data points."""
+        values_list = []
+        for creator in creators:
+            identity = (creator.user_id, creator.provider_name, creator.device_id)
+            mapping_id = mapping_map.get(identity)
+
+            if not mapping_id:
+                # Should not happen if resolve logic is correct, but safe skip
+                continue
+
+            values_list.append(
+                {
+                    "id": creator.id,
+                    "external_id": creator.external_id,
+                    "external_device_mapping_id": mapping_id,
+                    "recorded_at": creator.recorded_at,
+                    "value": creator.value,
+                    "series_type_definition_id": get_series_type_id(creator.series_type),
+                }
+            )
+
+        if values_list:
+            stmt = (
+                insert(self.model)
+                .values(values_list)
+                .on_conflict_do_nothing(
+                    index_elements=["external_device_mapping_id", "series_type_definition_id", "recorded_at"]
+                )
+            )
+            db_session.execute(stmt)
+            db_session.commit()
+
+    def try_commit(self, db_session: DbSession, creation: DataPointSeries) -> DataPointSeries:
         try:
-            creation = self.model(**creation_data)
-            db_session.add(creation)
             db_session.commit()
             db_session.refresh(creation)
             return creation
-        except Exception as e:
-            # Check if this is a unique constraint violation
-            from psycopg.errors import UniqueViolation
-            from sqlalchemy.exc import IntegrityError as SQLAIntegrityError
-
-            if isinstance(e, SQLAIntegrityError) and isinstance(e.orig, UniqueViolation):
+        except SQLAIntegrityError as e:
+            if isinstance(e.orig, UniqueViolation):
                 db_session.rollback()
 
                 # Query for existing record using the unique constraint fields
                 existing = (
                     db_session.query(self.model)
                     .filter(
-                        self.model.external_device_mapping_id == creation_data["external_device_mapping_id"],
-                        self.model.series_type_definition_id == creation_data["series_type_definition_id"],
-                        self.model.recorded_at == creation_data["recorded_at"],
+                        self.model.external_device_mapping_id == creation.external_device_mapping_id,
+                        self.model.series_type_definition_id == creation.series_type_definition_id,
+                        self.model.recorded_at == creation.recorded_at,
                     )
                     .first()
                 )
 
                 if existing:
                     return existing
-
-            # If it's not a duplicate error or we couldn't find the existing record, re-raise
+            # Re-raise if not a duplicate or if existing record not found
             raise
+
+    def create_mapping(self, db_session: DbSession, creator: TimeSeriesSampleCreate) -> ExternalDeviceMapping:
+        return self.mapping_repo.ensure_mapping(
+            db_session,
+            creator.user_id,
+            creator.provider_name,
+            creator.device_id,
+            creator.external_device_mapping_id,
+        )
 
     def get_samples(
         self,
@@ -152,7 +263,7 @@ class DataPointSeriesRepository(
             query = query.filter(self.model.recorded_at >= params.start_datetime)
 
         if params.end_datetime:
-            query = query.filter(self.model.recorded_at <= params.end_datetime)
+            query = query.filter(self.model.recorded_at < params.end_datetime)
 
         # Calculate total count BEFORE applying cursor pagination
         # This gives us the total matching records (after all other filters)
@@ -257,10 +368,12 @@ class DataPointSeriesRepository(
     ) -> dict[SeriesType, float | None]:
         """Get average values for specified series types within a time range.
 
+        Uses half-open interval [start_time, end_time).
+
         Returns a dict mapping SeriesType to average value (or None if no data).
         """
         if not series_types:
-            return {}
+            raise ValueError("series_types cannot be empty")
 
         type_ids = [get_series_type_id(t) for t in series_types]
 
@@ -273,7 +386,7 @@ class DataPointSeriesRepository(
             .filter(
                 ExternalDeviceMapping.user_id == user_id,
                 self.model.recorded_at >= start_time,
-                self.model.recorded_at <= end_time,
+                self.model.recorded_at < end_time,
                 self.model.series_type_definition_id.in_(type_ids),
             )
             .group_by(self.model.series_type_definition_id)
@@ -358,7 +471,7 @@ class DataPointSeriesRepository(
             .filter(
                 ExternalDeviceMapping.user_id == user_id,
                 self.model.recorded_at >= start_date,
-                cast(self.model.recorded_at, Date) <= cast(end_date, Date),
+                cast(self.model.recorded_at, Date) < cast(end_date, Date),
                 self.model.series_type_definition_id.in_(
                     [steps_id, energy_id, basal_energy_id, hr_id, distance_id, flights_id]
                 ),
@@ -434,7 +547,7 @@ class DataPointSeriesRepository(
             .filter(
                 ExternalDeviceMapping.user_id == user_id,
                 self.model.recorded_at >= start_date,
-                cast(self.model.recorded_at, Date) <= cast(end_date, Date),
+                cast(self.model.recorded_at, Date) < cast(end_date, Date),
                 self.model.series_type_definition_id == steps_id,
             )
             .group_by(
@@ -530,7 +643,7 @@ class DataPointSeriesRepository(
             .filter(
                 ExternalDeviceMapping.user_id == user_id,
                 self.model.recorded_at >= start_date,
-                cast(self.model.recorded_at, Date) <= cast(end_date, Date),
+                cast(self.model.recorded_at, Date) < cast(end_date, Date),
                 self.model.series_type_definition_id == hr_id,
             )
             .group_by(
@@ -603,4 +716,133 @@ class DataPointSeriesRepository(
                     "vigorous_minutes": int(row.vigorous_minutes) if row.vigorous_minutes else 0,
                 }
             )
+        return aggregates
+
+    def get_latest_values_for_types(
+        self,
+        db_session: DbSession,
+        user_id: UUID,
+        before_date: datetime,
+        series_types: list[SeriesType],
+    ) -> dict[SeriesType, tuple[float, datetime, str, str | None]]:
+        """Get the most recent value for each series type before a given date.
+
+        Used for slow-changing measurements like weight, height, body fat %.
+
+        Args:
+            before_date: Only consider measurements recorded before this datetime
+
+        Returns:
+            Dict mapping SeriesType to tuple of (value, recorded_at, provider_name, device_id)
+        """
+        if not series_types:
+            raise ValueError("series_types cannot be empty")
+
+        type_ids = [get_series_type_id(t) for t in series_types]
+
+        # Subquery to get the max recorded_at for each series type
+        latest_subq = (
+            db_session.query(
+                self.model.series_type_definition_id,
+                func.max(self.model.recorded_at).label("max_recorded_at"),
+            )
+            .join(ExternalDeviceMapping, self.model.external_device_mapping_id == ExternalDeviceMapping.id)
+            .filter(
+                ExternalDeviceMapping.user_id == user_id,
+                self.model.recorded_at < before_date,
+                self.model.series_type_definition_id.in_(type_ids),
+            )
+            .group_by(self.model.series_type_definition_id)
+            .subquery()
+        )
+
+        # Main query to get the actual values at those timestamps
+        # Use DISTINCT ON to handle multiple records with identical timestamps
+        results = (
+            db_session.query(
+                self.model.series_type_definition_id,
+                self.model.value,
+                self.model.recorded_at,
+                ExternalDeviceMapping.provider_name,
+                ExternalDeviceMapping.device_id,
+            )
+            .join(ExternalDeviceMapping, self.model.external_device_mapping_id == ExternalDeviceMapping.id)
+            .join(
+                latest_subq,
+                (self.model.series_type_definition_id == latest_subq.c.series_type_definition_id)
+                & (self.model.recorded_at == latest_subq.c.max_recorded_at),
+            )
+            .filter(ExternalDeviceMapping.user_id == user_id)
+            # DISTINCT ON (PostgreSQL) ensures exactly one result per series type
+            # Order by id desc as tiebreaker for deterministic selection
+            .distinct(self.model.series_type_definition_id)
+            .order_by(self.model.series_type_definition_id, self.model.id.desc())
+            .all()
+        )
+
+        # Build result dict
+        latest_values: dict[SeriesType, tuple[float, datetime, str, str | None]] = {}
+        for type_id, value, recorded_at, provider_name, device_id in results:
+            try:
+                series_type = get_series_type_from_id(type_id)
+                latest_values[series_type] = (float(value), recorded_at, provider_name, device_id)
+            except KeyError:
+                pass
+
+        return latest_values
+
+    def get_aggregates_for_period(
+        self,
+        db_session: DbSession,
+        user_id: UUID,
+        start_date: datetime,
+        end_date: datetime,
+        series_types: list[SeriesType],
+    ) -> dict[SeriesType, dict]:
+        """Get aggregate statistics for each series type within a time period.
+
+        Used for high-frequency measurements that need aggregation like
+        resting heart rate, HRV, blood pressure.
+
+        Returns:
+            Dict mapping SeriesType to dict with keys: avg, min, max, count
+        """
+        if not series_types:
+            raise ValueError("series_types cannot be empty")
+
+        type_ids = [get_series_type_id(t) for t in series_types]
+
+        results = (
+            db_session.query(
+                self.model.series_type_definition_id,
+                func.avg(self.model.value).label("avg_value"),
+                func.min(self.model.value).label("min_value"),
+                func.max(self.model.value).label("max_value"),
+                func.count(self.model.id).label("count"),
+            )
+            .join(ExternalDeviceMapping, self.model.external_device_mapping_id == ExternalDeviceMapping.id)
+            .filter(
+                ExternalDeviceMapping.user_id == user_id,
+                self.model.recorded_at >= start_date,
+                self.model.recorded_at < end_date,
+                self.model.series_type_definition_id.in_(type_ids),
+            )
+            .group_by(self.model.series_type_definition_id)
+            .all()
+        )
+
+        # Build result dict
+        aggregates: dict[SeriesType, dict] = {}
+        for type_id, avg_val, min_val, max_val, count in results:
+            try:
+                series_type = get_series_type_from_id(type_id)
+                aggregates[series_type] = {
+                    "avg": float(avg_val) if avg_val is not None else None,
+                    "min": float(min_val) if min_val is not None else None,
+                    "max": float(max_val) if max_val is not None else None,
+                    "count": count,
+                }
+            except KeyError:
+                pass
+
         return aggregates

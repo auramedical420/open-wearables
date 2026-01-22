@@ -10,17 +10,6 @@
 
 
 
-## Type of Change
-
-<!-- Check all that apply -->
-
-- [ ] Bug fix (non-breaking change that fixes an issue)
-- [ ] New feature (non-breaking change that adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] Documentation update
-- [ ] Refactoring (no functional changes)
-- [ ] Other (please describe):
-
 ## Checklist
 
 ### General
@@ -33,10 +22,8 @@
 ### Backend Changes
 
 <!-- If your PR includes backend changes, please verify: -->
-
-- [ ] `uv run ruff check` passes
-- [ ] `uv run ruff format --check` passes
-- [ ] `uv run ty check` passes
+You have to be in `backend` directory to make it work:
+- [ ] `uv run pre-commit run --all-files` passes
 
 ### Frontend Changes
 

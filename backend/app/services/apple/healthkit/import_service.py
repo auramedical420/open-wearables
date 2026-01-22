@@ -4,8 +4,10 @@ from logging import Logger, getLogger
 from typing import Iterable
 from uuid import UUID, uuid4
 
-from app.constants.series_types import get_series_type_from_apple_metric_type, get_series_type_from_healthion_type
-from app.constants.workout_types import get_unified_apple_workout_type
+from app.constants.series_types import (
+    get_series_type_from_apple_metric_type,
+)
+from app.constants.workout_types import get_unified_apple_workout_type_sdk
 from app.database import DbSession
 from app.schemas import (
     EventRecordCreate,
@@ -24,6 +26,8 @@ from app.schemas import (
 from app.services.event_record_service import event_record_service
 from app.services.timeseries_service import timeseries_service
 from app.utils.sentry_helpers import log_and_capture_error
+
+from .sleep_service import handle_sleep_data
 
 
 class ImportService:
@@ -53,16 +57,17 @@ class ImportService:
             workout_id = uuid4()
             external_id = wjson.uuid if wjson.uuid else None
 
-            duration_seconds = int((wjson.endDate - wjson.startDate).total_seconds())
+            metrics, duration = self._extract_metrics_from_workout_stats(wjson.workoutStatistics)
 
-            metrics = self._extract_metrics_from_workout_stats(wjson.workoutStatistics)
+            if duration is None:
+                duration = int((wjson.endDate - wjson.startDate).total_seconds())
 
             record = EventRecordCreate(
                 category="workout",
-                type=get_unified_apple_workout_type(wjson.type).value if wjson.type else None,
+                type=get_unified_apple_workout_type_sdk(wjson.type).value if wjson.type else None,
                 source_name=wjson.sourceName or "Apple Health",
                 device_id=wjson.sourceName or None,
-                duration_seconds=duration_seconds,
+                duration_seconds=int(duration),
                 start_datetime=wjson.startDate,
                 end_datetime=wjson.endDate,
                 id=workout_id,
@@ -94,8 +99,11 @@ class ImportService:
 
             record_type = rjson.type or ""
             series_type = get_series_type_from_apple_metric_type(record_type)
-            if series_type is None:
+            if not series_type:
                 continue
+            # Convert from meters to centimeters or ratio to percentage
+            if series_type in (SeriesType.height, SeriesType.body_fat_percentage):
+                value = value * 100
 
             sample = TimeSeriesSampleCreate(
                 id=uuid4(),
@@ -126,30 +134,79 @@ class ImportService:
         avg_v = sum(values, Decimal("0")) / Decimal(len(values))
         return min_v, max_v, avg_v
 
-    def _extract_metrics_from_workout_stats(self, stats: list[HKWorkoutStatisticJSON] | None) -> EventRecordMetrics:
-        stats_dict: dict[str, Decimal] = {}
-
+    def _extract_metrics_from_workout_stats(
+        self,
+        stats: list[HKWorkoutStatisticJSON] | None,
+    ) -> tuple[EventRecordMetrics, int | float | None]:
+        """
+        Returns a dictionary with the metrics and duration.
+        """
         if stats is None:
-            return EventRecordMetrics()
+            return EventRecordMetrics(), None
+
+        stats_dict: dict[str, Decimal] = {}
+        stats_dict["energy_burned"] = Decimal("0")
+        duration: float | None = None
 
         for stat in stats:
             value = self._dec(stat.value)
             if value is None or stat.type is None:
                 continue
-            series_type = get_series_type_from_healthion_type(stat.type)
-            if series_type is None:
-                continue
-            match series_type:
-                case SeriesType.energy:
-                    stats_dict["energy_burned"] = value
-                case SeriesType.distance_walking_running:
+
+            match stat.type:
+                case "activeEnergyBurned":
+                    stats_dict["energy_burned"] += value
+                case "averageGroundContactTime":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "averageHeartRate":
+                    stats_dict["heart_rate_avg"] = value
+                case "averageMETs":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "averageRunningPower":
+                    stats_dict["average_watts"] = value
+                case "averageRunningSpeed":
+                    stats_dict["average_speed"] = value
+                case "averageRunningStrideLength":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "averageSpeed":
+                    if "average_speed" not in stats_dict:
+                        stats_dict["average_speed"] = value
+                case "averageVerticalOscillation":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "basalEnergyBurned":
+                    stats_dict["energy_burned"] += value
+                case "distance":
                     stats_dict["distance"] = value
-                case SeriesType.steps:
+                case "duration":
+                    duration = float(value)
+                case "elevationAscended":
+                    stats_dict["total_elevation_gain"] = value
+                case "elevationDescended":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "indoorWorkout":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "lapLength":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "maxHeartRate":
+                    stats_dict["heart_rate_max"] = value
+                case "maxSpeed":
+                    stats_dict["max_speed"] = value
+                case "minHeartRate":
+                    stats_dict["heart_rate_min"] = value
+                case "stepCount":
                     stats_dict["steps_count"] = value
+                case "swimmingLocationType":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "swimmingStrokeCount":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "weatherHumidity":
+                    pass  # No corresponding field in EventRecordMetrics
+                case "weatherTemperature":
+                    pass  # No corresponding field in EventRecordMetrics
                 case _:
                     continue
 
-        return EventRecordMetrics(**stats_dict)
+        return EventRecordMetrics(**stats_dict), duration
 
     def load_data(self, db_session: DbSession, raw: dict, user_id: str) -> bool:
         for record, detail in self._build_workout_bundles(raw, user_id):
@@ -160,6 +217,8 @@ class ImportService:
 
         samples = self._build_statistic_bundles(raw, user_id)
         self.timeseries_service.bulk_create_samples(db_session, samples)
+
+        handle_sleep_data(db_session, raw, user_id)
 
         return True
 
@@ -178,16 +237,16 @@ class ImportService:
                 data = self._parse_json_content(request_content)
 
             if not data:
-                return UploadDataResponse(status_code=400, response="No valid data found")
+                return UploadDataResponse(status_code=400, response="No valid data found", user_id=user_id)
 
             # Load data using provided database session
             self.load_data(db_session, data, user_id=user_id)
 
         except Exception as e:
             log_and_capture_error(e, self.log, f"Import failed for user {user_id}: {e}", extra={"user_id": user_id})
-            return UploadDataResponse(status_code=400, response=f"Import failed: {str(e)}")
+            return UploadDataResponse(status_code=400, response=f"Import failed: {str(e)}", user_id=user_id)
 
-        return UploadDataResponse(status_code=200, response="Import successful")
+        return UploadDataResponse(status_code=200, response="Import successful", user_id=user_id)
 
     def _parse_multipart_content(self, content: str) -> dict | None:
         """Parse multipart form data to extract JSON."""
