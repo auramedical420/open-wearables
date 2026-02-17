@@ -45,7 +45,9 @@ def upgrade() -> None:
         sa.UniqueConstraint("provider"),
     )
     op.create_index("idx_provider_priority_order", "provider_priority", ["priority"], unique=False)
-    op.add_column("data_source", sa.Column("provider", sa.String(length=50), nullable=False))
+    op.add_column("data_source", sa.Column("provider", sa.String(length=50), nullable=True))
+    op.execute("UPDATE data_source SET provider = COALESCE(source, 'garmin') WHERE provider IS NULL")
+    op.alter_column("data_source", "provider", nullable=False)
     op.add_column("data_source", sa.Column("user_connection_id", sa.UUID(), nullable=True))
     op.add_column("data_source", sa.Column("device_type", sa.String(length=32), nullable=True))
     op.add_column("data_source", sa.Column("original_source_name", sa.String(length=100), nullable=True))
