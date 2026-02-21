@@ -15,7 +15,7 @@ from app.repositories.user_connection_repository import UserConnectionRepository
 from app.schemas.series_types import SeriesType, get_series_type_id
 from app.services.providers.garmin.data_247 import Garmin247Data
 from app.services.providers.garmin.oauth import GarminOAuth
-from tests.factories import DataPointSeriesFactory, DataSourceFactory
+from tests.factories import DataPointSeriesFactory, DataSourceFactory, UserFactory
 
 
 def _get_series_type(db: Session, series_type: SeriesType) -> SeriesTypeDefinition:
@@ -79,8 +79,8 @@ class TestActivityAggregateStepsPriority:
 
     def test_prefers_daily_total_over_epoch_sum(self, db: Session, repo: DataPointSeriesRepository) -> None:
         """When both steps and steps_daily_total exist, use steps_daily_total."""
-        user_id = uuid4()
-        data_source = DataSourceFactory(user_id=user_id, source="garmin")
+        user = UserFactory()
+        data_source = DataSourceFactory(user=user, source="garmin")
 
         steps_type = _get_series_type(db, SeriesType.steps)
         daily_total_type = _get_series_type(db, SeriesType.steps_daily_total)
@@ -108,7 +108,7 @@ class TestActivityAggregateStepsPriority:
 
         results = repo.get_daily_activity_aggregates(
             db_session=db,
-            user_id=user_id,
+            user_id=user.id,
             start_date=date(2026, 2, 20),
             end_date=date(2026, 2, 21),
         )
@@ -119,8 +119,8 @@ class TestActivityAggregateStepsPriority:
 
     def test_falls_back_to_epoch_sum_when_no_daily_total(self, db: Session, repo: DataPointSeriesRepository) -> None:
         """When only epoch steps exist (no daily total), use SUM(steps) as before."""
-        user_id = uuid4()
-        data_source = DataSourceFactory(user_id=user_id, source="garmin")
+        user = UserFactory()
+        data_source = DataSourceFactory(user=user, source="garmin")
 
         steps_type = _get_series_type(db, SeriesType.steps)
 
@@ -135,7 +135,7 @@ class TestActivityAggregateStepsPriority:
 
         results = repo.get_daily_activity_aggregates(
             db_session=db,
-            user_id=user_id,
+            user_id=user.id,
             start_date=date(2026, 2, 20),
             end_date=date(2026, 2, 21),
         )
