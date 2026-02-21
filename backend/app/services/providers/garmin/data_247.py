@@ -346,7 +346,7 @@ class Garmin247Data(Base247DataTemplate):
             return samples
 
         series_mappings: list[tuple[str, SeriesType]] = [
-            ("steps", SeriesType.steps),
+            ("steps", SeriesType.steps_daily_total),
             ("active_calories", SeriesType.energy),
             ("resting_heart_rate", SeriesType.resting_heart_rate),
             ("floors_climbed", SeriesType.flights_climbed),
