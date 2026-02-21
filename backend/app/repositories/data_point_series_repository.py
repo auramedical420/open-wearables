@@ -432,9 +432,12 @@ class DataPointSeriesRepository(
                     "steps_sum"
                 ),
                 # Steps daily total - official provider value (from dailies webhook)
-                func.max(case((self.model.series_type_definition_id == steps_daily_total_id, self.model.value), else_=None)).label(
-                    "steps_daily_total"
-                ),
+                func.max(
+                    case(
+                        (self.model.series_type_definition_id == steps_daily_total_id, self.model.value),
+                        else_=None,
+                    )
+                ).label("steps_daily_total"),
                 # Active energy - sum for the day
                 func.sum(case((self.model.series_type_definition_id == energy_id, self.model.value), else_=0)).label(
                     "active_energy_sum"
@@ -489,7 +492,11 @@ class DataPointSeriesRepository(
                     "source": row.source,
                     "device_model": row.device_model,
                     # Prefer official daily total; fall back to epoch sum
-                    "steps_sum": int(row.steps_daily_total) if row.steps_daily_total is not None else (int(row.steps_sum) if row.steps_sum else 0),
+                    "steps_sum": (
+                        int(row.steps_daily_total)
+                        if row.steps_daily_total is not None
+                        else (int(row.steps_sum) if row.steps_sum else 0)
+                    ),
                     "active_energy_sum": float(row.active_energy_sum) if row.active_energy_sum else 0.0,
                     "basal_energy_sum": float(row.basal_energy_sum) if row.basal_energy_sum else 0.0,
                     "hr_avg": int(round(float(row.hr_avg))) if row.hr_avg is not None else None,
