@@ -57,6 +57,7 @@ class SeriesType(str, Enum):
     # ACTIVITY - Basic (IDs 80-99)
     # =========================================================================
     steps = "steps"
+    steps_daily_total = "steps_daily_total"  # Official provider daily total (not epoch sum)
     energy = "energy"  # Active energy burned
     basal_energy = "basal_energy"
     stand_time = "stand_time"
@@ -166,6 +167,7 @@ SERIES_TYPE_DEFINITIONS: list[tuple[int, SeriesType, str]] = [
     # ACTIVITY - Basic (IDs 80-99)
     # -------------------------------------------------------------------------
     (80, SeriesType.steps, "count"),
+    (87, SeriesType.steps_daily_total, "count"),  # Official daily total from provider
     (81, SeriesType.energy, "kcal"),
     (82, SeriesType.basal_energy, "kcal"),
     (83, SeriesType.stand_time, "minutes"),
