@@ -1,10 +1,16 @@
 """Test that Garmin dailies webhook saves steps as steps_daily_total, not steps."""
 
+import pytest
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from app.schemas.series_types import SeriesType
+from sqlalchemy.orm import Session
+
+from app.repositories.data_point_series_repository import DataPointSeriesRepository
+from app.schemas.series_types import SeriesType, get_series_type_id
 from app.services.providers.garmin.data_247 import Garmin247Service
+from tests.factories import DataSourceFactory, DataPointSeriesFactory
 
 
 class TestDailiesStepsSeries:
@@ -36,3 +42,78 @@ class TestDailiesStepsSeries:
         # Ensure no sample uses the old SeriesType.steps
         old_steps = [s for s in samples if s.series_type == SeriesType.steps]
         assert len(old_steps) == 0, "Dailies should NOT save as SeriesType.steps (epochs do that)"
+
+
+class TestActivityAggregateStepsPriority:
+    """Activity aggregates should prefer steps_daily_total over epoch SUM(steps)."""
+
+    @pytest.fixture
+    def repo(self) -> DataPointSeriesRepository:
+        return DataPointSeriesRepository()
+
+    def test_prefers_daily_total_over_epoch_sum(self, db: Session, repo: DataPointSeriesRepository):
+        """When both steps and steps_daily_total exist, use steps_daily_total."""
+        user_id = uuid4()
+        data_source = DataSourceFactory(user_id=user_id, source="garmin")
+
+        test_date = datetime(2026, 2, 20, 3, 0, 0, tzinfo=timezone.utc)  # midnight BRT
+
+        # Epoch steps: data points summing to 3072 (imprecise)
+        steps_type_id = get_series_type_id(SeriesType.steps)
+        for i in range(96):
+            ts = test_date + timedelta(minutes=15 * i)
+            DataPointSeriesFactory(
+                data_source=data_source,
+                series_type_definition_id=steps_type_id,
+                recorded_at=ts,
+                value=32,  # 32 * 96 = 3072
+            )
+
+        # Daily total: 3392 (accurate, from Garmin dailies)
+        daily_total_type_id = get_series_type_id(SeriesType.steps_daily_total)
+        DataPointSeriesFactory(
+            data_source=data_source,
+            series_type_definition_id=daily_total_type_id,
+            recorded_at=test_date,
+            value=3392,
+        )
+
+        db.flush()
+
+        results = repo.get_daily_activity_aggregates(
+            db_session=db,
+            user_id=user_id,
+            start_date=date(2026, 2, 20),
+            end_date=date(2026, 2, 21),
+        )
+
+        assert len(results) == 1
+        # Should use daily total (3392), not epoch sum (3072)
+        assert results[0]["steps_sum"] == 3392
+
+    def test_falls_back_to_epoch_sum_when_no_daily_total(self, db: Session, repo: DataPointSeriesRepository):
+        """When only epoch steps exist (no daily total), use SUM(steps) as before."""
+        user_id = uuid4()
+        data_source = DataSourceFactory(user_id=user_id, source="garmin")
+
+        test_date = datetime(2026, 2, 20, 12, 0, 0, tzinfo=timezone.utc)
+        steps_type_id = get_series_type_id(SeriesType.steps)
+
+        DataPointSeriesFactory(
+            data_source=data_source,
+            series_type_definition_id=steps_type_id,
+            recorded_at=test_date,
+            value=5000,
+        )
+
+        db.flush()
+
+        results = repo.get_daily_activity_aggregates(
+            db_session=db,
+            user_id=user_id,
+            start_date=date(2026, 2, 20),
+            end_date=date(2026, 2, 21),
+        )
+
+        assert len(results) == 1
+        assert results[0]["steps_sum"] == 5000

@@ -414,6 +414,7 @@ class DataPointSeriesRepository(
         """
         # Series type IDs we need
         steps_id = get_series_type_id(SeriesType.steps)
+        steps_daily_total_id = get_series_type_id(SeriesType.steps_daily_total)
         energy_id = get_series_type_id(SeriesType.energy)
         basal_energy_id = get_series_type_id(SeriesType.basal_energy)
         hr_id = get_series_type_id(SeriesType.heart_rate)
@@ -426,9 +427,13 @@ class DataPointSeriesRepository(
                 cast(self.model.recorded_at, Date).label("activity_date"),
                 DataSource.source.label("source"),
                 DataSource.device_model.label("device_model"),
-                # Steps - sum for the day
+                # Steps - sum for the day (from epochs)
                 func.sum(case((self.model.series_type_definition_id == steps_id, self.model.value), else_=0)).label(
                     "steps_sum"
+                ),
+                # Steps daily total - official provider value (from dailies webhook)
+                func.max(case((self.model.series_type_definition_id == steps_daily_total_id, self.model.value), else_=None)).label(
+                    "steps_daily_total"
                 ),
                 # Active energy - sum for the day
                 func.sum(case((self.model.series_type_definition_id == energy_id, self.model.value), else_=0)).label(
@@ -463,7 +468,7 @@ class DataPointSeriesRepository(
                 self.model.recorded_at >= start_date,
                 cast(self.model.recorded_at, Date) < cast(end_date, Date),
                 self.model.series_type_definition_id.in_(
-                    [steps_id, energy_id, basal_energy_id, hr_id, distance_id, flights_id]
+                    [steps_id, steps_daily_total_id, energy_id, basal_energy_id, hr_id, distance_id, flights_id]
                 ),
             )
             .group_by(
@@ -483,7 +488,8 @@ class DataPointSeriesRepository(
                     "activity_date": row.activity_date,
                     "source": row.source,
                     "device_model": row.device_model,
-                    "steps_sum": int(row.steps_sum) if row.steps_sum else 0,
+                    # Prefer official daily total; fall back to epoch sum
+                    "steps_sum": int(row.steps_daily_total) if row.steps_daily_total is not None else (int(row.steps_sum) if row.steps_sum else 0),
                     "active_energy_sum": float(row.active_energy_sum) if row.active_energy_sum else 0.0,
                     "basal_energy_sum": float(row.basal_energy_sum) if row.basal_energy_sum else 0.0,
                     "hr_avg": int(round(float(row.hr_avg))) if row.hr_avg is not None else None,
