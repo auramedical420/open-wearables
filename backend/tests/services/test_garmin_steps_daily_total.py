@@ -2,23 +2,42 @@
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.orm import Session
 
+from app.models import DataPointSeries
 from app.repositories.data_point_series_repository import DataPointSeriesRepository
+from app.repositories.user_connection_repository import UserConnectionRepository
 from app.schemas.series_types import SeriesType, get_series_type_id
 from app.services.providers.garmin.data_247 import Garmin247Data
+from app.services.providers.garmin.oauth import GarminOAuth
 from tests.factories import DataPointSeriesFactory, DataSourceFactory
 
 
 class TestDailiesStepsSeries:
     """Verify _build_dailies_samples uses steps_daily_total for steps."""
 
-    def test_dailies_steps_use_daily_total_type(self) -> None:
+    @pytest.fixture
+    def garmin_247(self) -> Garmin247Data:
+        """Create Garmin247Data instance for testing."""
+        connection_repo = UserConnectionRepository()
+        oauth = GarminOAuth(
+            user_repo=MagicMock(),
+            connection_repo=connection_repo,
+            provider_name="garmin",
+            api_base_url="https://apis.garmin.com",
+        )
+        return Garmin247Data(
+            provider_name="garmin",
+            api_base_url="https://apis.garmin.com",
+            oauth=oauth,
+        )
+
+    def test_dailies_steps_use_daily_total_type(self, garmin_247: Garmin247Data) -> None:
         """Steps from dailies webhook should be saved as steps_daily_total, not steps."""
-        service = Garmin247Data()
         user_id = uuid4()
 
         normalized = {
@@ -32,7 +51,7 @@ class TestDailiesStepsSeries:
             "garmin_summary_id": "test-summary-123",
         }
 
-        samples = service._build_dailies_samples(user_id, normalized)
+        samples = garmin_247._build_dailies_samples(user_id, normalized)
 
         # Find the steps sample
         steps_samples = [s for s in samples if s.series_type == SeriesType.steps_daily_total]
@@ -49,7 +68,7 @@ class TestActivityAggregateStepsPriority:
 
     @pytest.fixture
     def repo(self) -> DataPointSeriesRepository:
-        return DataPointSeriesRepository()
+        return DataPointSeriesRepository(DataPointSeries)
 
     def test_prefers_daily_total_over_epoch_sum(self, db: Session, repo: DataPointSeriesRepository) -> None:
         """When both steps and steps_daily_total exist, use steps_daily_total."""
