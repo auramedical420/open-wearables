@@ -9,12 +9,19 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.models import DataPointSeries
+from app.models.series_type_definition import SeriesTypeDefinition
 from app.repositories.data_point_series_repository import DataPointSeriesRepository
 from app.repositories.user_connection_repository import UserConnectionRepository
 from app.schemas.series_types import SeriesType, get_series_type_id
 from app.services.providers.garmin.data_247 import Garmin247Data
 from app.services.providers.garmin.oauth import GarminOAuth
 from tests.factories import DataPointSeriesFactory, DataSourceFactory
+
+
+def _get_series_type(db: Session, series_type: SeriesType) -> SeriesTypeDefinition:
+    """Get a pre-seeded SeriesTypeDefinition by enum."""
+    type_id = get_series_type_id(series_type)
+    return db.query(SeriesTypeDefinition).filter(SeriesTypeDefinition.id == type_id).one()
 
 
 class TestDailiesStepsSeries:
@@ -75,25 +82,25 @@ class TestActivityAggregateStepsPriority:
         user_id = uuid4()
         data_source = DataSourceFactory(user_id=user_id, source="garmin")
 
-        test_date = datetime(2026, 2, 20, 3, 0, 0, tzinfo=timezone.utc)  # midnight BRT
+        steps_type = _get_series_type(db, SeriesType.steps)
+        daily_total_type = _get_series_type(db, SeriesType.steps_daily_total)
 
-        # Epoch steps: data points summing to 3072 (imprecise)
-        steps_type_id = get_series_type_id(SeriesType.steps)
+        base_date = datetime(2026, 2, 20, 3, 0, 0, tzinfo=timezone.utc)  # midnight BRT
+
+        # Epoch steps: 96 data points at 15-min intervals, sum = 3072
         for i in range(96):
-            ts = test_date + timedelta(minutes=15 * i)
             DataPointSeriesFactory(
                 data_source=data_source,
-                series_type_definition_id=steps_type_id,
-                recorded_at=ts,
-                value=32,  # 32 * 96 = 3072
+                series_type=steps_type,
+                recorded_at=base_date + timedelta(minutes=15 * i),
+                value=32,
             )
 
-        # Daily total: 3392 (accurate, from Garmin dailies)
-        daily_total_type_id = get_series_type_id(SeriesType.steps_daily_total)
+        # Daily total: 3392 (accurate, from Garmin dailies) — at noon to avoid collision
         DataPointSeriesFactory(
             data_source=data_source,
-            series_type_definition_id=daily_total_type_id,
-            recorded_at=test_date,
+            series_type=daily_total_type,
+            recorded_at=base_date.replace(hour=12),
             value=3392,
         )
 
@@ -115,13 +122,12 @@ class TestActivityAggregateStepsPriority:
         user_id = uuid4()
         data_source = DataSourceFactory(user_id=user_id, source="garmin")
 
-        test_date = datetime(2026, 2, 20, 12, 0, 0, tzinfo=timezone.utc)
-        steps_type_id = get_series_type_id(SeriesType.steps)
+        steps_type = _get_series_type(db, SeriesType.steps)
 
         DataPointSeriesFactory(
             data_source=data_source,
-            series_type_definition_id=steps_type_id,
-            recorded_at=test_date,
+            series_type=steps_type,
+            recorded_at=datetime(2026, 2, 20, 12, 0, 0, tzinfo=timezone.utc),
             value=5000,
         )
 
