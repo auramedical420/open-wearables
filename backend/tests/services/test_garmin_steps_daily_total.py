@@ -51,9 +51,7 @@ class TestActivityAggregateStepsPriority:
     def repo(self) -> DataPointSeriesRepository:
         return DataPointSeriesRepository()
 
-    def test_prefers_daily_total_over_epoch_sum(
-        self, db: Session, repo: DataPointSeriesRepository
-    ) -> None:
+    def test_prefers_daily_total_over_epoch_sum(self, db: Session, repo: DataPointSeriesRepository) -> None:
         """When both steps and steps_daily_total exist, use steps_daily_total."""
         user_id = uuid4()
         data_source = DataSourceFactory(user_id=user_id, source="garmin")
@@ -93,9 +91,7 @@ class TestActivityAggregateStepsPriority:
         # Should use daily total (3392), not epoch sum (3072)
         assert results[0]["steps_sum"] == 3392
 
-    def test_falls_back_to_epoch_sum_when_no_daily_total(
-        self, db: Session, repo: DataPointSeriesRepository
-    ) -> None:
+    def test_falls_back_to_epoch_sum_when_no_daily_total(self, db: Session, repo: DataPointSeriesRepository) -> None:
         """When only epoch steps exist (no daily total), use SUM(steps) as before."""
         user_id = uuid4()
         data_source = DataSourceFactory(user_id=user_id, source="garmin")
